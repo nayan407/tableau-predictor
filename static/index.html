@@ -79,10 +79,8 @@
   <script>
     let pooledRecords = [];
 
-    // Helper to get clean, human-readable column names
     function getCleanColumnName(colMeta) {
       let name = colMeta.caption || colMeta.fieldName || "Feature";
-      // Remove Tableau internal calculation syntax e.g. [federated...].[usr:Calc:qk]
       name = name.replace(/\[federated\.[^\]]+\]\./gi, '');
       name = name.replace(/\[usr:([^:\]]+)(?::[^\]]+)?\]/gi, '$1');
       name = name.replace(/[\[\]]/g, '').trim();
@@ -149,7 +147,7 @@
     async function sendToModel(records, selectedRecord) {
       const statusEl = document.getElementById("status");
       try {
-        const response = await fetch("http://localhost:8000/predict", {
+        const response = await fetch("/predict", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
