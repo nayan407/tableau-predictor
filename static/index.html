@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Prediction Insights</title>
+  <script src="https://cdn.jsdelivr.net/gh/tableau/extensions-api/lib/tableau.extensions.1.latest.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #333333;
+      padding: 16px;
+      margin: 0;
+      background: #ffffff;
+    }
+    .header-title { font-size: 14px; color: #706e6b; margin-bottom: 12px; font-weight: 500; }
+    .metric-value { font-size: 46px; font-weight: 700; line-height: 1; color: #2e384d; margin-bottom: 4px; }
+    .metric-sub { font-size: 13px; color: #555555; margin-bottom: 20px; }
+    .section-title { font-size: 12px; font-weight: 600; color: #706e6b; margin-bottom: 10px; }
+    .section-block { margin-bottom: 18px; }
+    .list-item { display: flex; align-items: center; font-size: 12.5px; margin-bottom: 8px; }
+    .badge-icon {
+      width: 15px; height: 15px; border-radius: 50%;
+      background: #04844b; color: #ffffff;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 9px; margin-right: 8px; flex-shrink: 0;
+    }
+    .badge-icon.negative { background: #c23934; }
+    .score-green { color: #04844b; font-weight: 700; margin-right: 8px; min-width: 32px; }
+    .score-red { color: #c23934; font-weight: 700; margin-right: 8px; min-width: 32px; }
+    .desc { color: #4b4b4b; }
+    .summary-box {
+      background: #f8fafc;
+      border-left: 3px solid #0176d3;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: #333333;
+      border-radius: 0 4px 4px 0;
+    }
+    .status-msg {
+      margin-top: 14px;
+      padding: 6px 8px;
+      background: #f7f9fa;
+      border-radius: 4px;
+      font-size: 11px;
+      color: #706e6b;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <div class="header-title" id="card-header">Predicted Likelihood</div>
+  <div class="metric-value" id="score">--%</div>
+  <div class="metric-sub" id="card-sub">Likely Outcome</div>
+
+  <div class="section-block">
+    <div class="section-title">Top Predictors</div>
+    <div id="predictors-container">
+      <div class="list-item"><span class="desc" style="color:#888;">Reading workbook records...</span></div>
+    </div>
+  </div>
+
+  <div class="section-block">
+    <div class="section-title">How To Improve This</div>
+    <div id="improvements-container">
+      <div class="list-item"><span class="desc" style="color:#888;">Reading workbook records...</span></div>
+    </div>
+  </div>
+
+  <div class="section-block">
+    <div class="section-title">Summary</div>
+    <div id="summary-container" class="summary-box">
+      Evaluating model results...
+    </div>
+  </div>
+
+  <div id="status" class="status-msg">Extracting workbook data...</div>
+
+  <script>
+    let pooledRecords = [];
+
+    // Helper to get clean, human-readable column names
+    function getCleanColumnName(colMeta) {
+      let name = colMeta.caption || colMeta.fieldName || "Feature";
+      // Remove Tableau internal calculation syntax e.g. [federated...].[usr:Calc:qk]
+      name = name.replace(/\[federated\.[^\]]+\]\./gi, '');
+      name = name.replace(/\[usr:([^:\]]+)(?::[^\]]+)?\]/gi, '$1');
+      name = name.replace(/[\[\]]/g, '').trim();
+      return name;
+    }
+
+    function normalizeRow(columnsMeta, rowValues) {
+      const record = {};
+      let mName = null;
+      let mVal = null;
+
+      columnsMeta.forEach((colMeta, idx) => {
+        const cleanName = getCleanColumnName(colMeta);
+        const val = rowValues[idx].value;
+
+        if (cleanName === "Measure Names") {
+          mName = val;
+        } else if (cleanName === "Measure Values") {
+          mVal = val;
+        } else {
+          record[cleanName] = val;
+        }
+      });
+
+      if (mName && mVal !== null && mVal !== undefined) {
+        record[mName] = mVal;
+      }
+      return record;
+    }
+
+    tableau.extensions.initializeAsync().then(async () => {
+      const dashboard = tableau.extensions.dashboardContent.dashboard;
+      const statusEl = document.getElementById("status");
+
+      for (const sheet of dashboard.worksheets) {
+        try {
+          const summary = await sheet.getSummaryDataAsync();
+          if (summary.data && summary.data.length > 0) {
+            summary.data.forEach(row => {
+              pooledRecords.push(normalizeRow(summary.columns, row));
+            });
+          }
+        } catch (e) {}
+      }
+
+      if (pooledRecords.length > 0) {
+        statusEl.innerText = `Ingested ${pooledRecords.length} records. Computing prediction...`;
+        sendToModel(pooledRecords, pooledRecords[0]);
+      } else {
+        statusEl.innerText = "No data rows available on dashboard worksheets.";
+      }
+
+      dashboard.worksheets.forEach((sheet) => {
+        sheet.addEventListener(tableau.TableauEventType.MarkSelectionChanged, async (event) => {
+          const marks = await event.getMarksAsync();
+          if (marks.data && marks.data.length > 0 && marks.data[0].data.length > 0) {
+            const selectedRecord = normalizeRow(marks.data[0].columns, marks.data[0].data[0]);
+            sendToModel(pooledRecords, selectedRecord);
+          }
+        });
+      });
+    });
+
+    async function sendToModel(records, selectedRecord) {
+      const statusEl = document.getElementById("status");
+      try {
+        const response = await fetch("http://localhost:8000/predict", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            records: records,
+            selected_record: selectedRecord || records[0]
+          })
+        });
+
+        const result = await response.json();
+        if (result.error) {
+          statusEl.innerText = result.error;
+        } else {
+          renderCard(result);
+          statusEl.innerText = `Evaluated across ${records.length} records in workbook.`;
+        }
+      } catch (err) {
+        statusEl.innerText = "Request failed: " + err.message;
+      }
+    }
+
+    function renderCard(data) {
+      document.getElementById("card-header").innerText = `Predicted Outcome: ${data.target_name}`;
+      document.getElementById("card-sub").innerText = `Likelihood: ${data.target_name}`;
+      document.getElementById("score").innerText = data.likelihood + "%";
+
+      const predCont = document.getElementById("predictors-container");
+      predCont.innerHTML = data.predictors.map(p => `
+        <div class="list-item">
+          <span class="badge-icon ${p.impact >= 0 ? '' : 'negative'}">▲</span>
+          <span class="${p.impact >= 0 ? 'score-green' : 'score-red'}">${Math.abs(p.impact)}</span>
+          <span class="desc">${p.label}</span>
+        </div>
+      `).join('');
+
+      const impCont = document.getElementById("improvements-container");
+      impCont.innerHTML = data.improvements.map(i => `
+        <div class="list-item">
+          <span class="badge-icon">▲</span>
+          <span class="score-green">${i.lift}</span>
+          <span class="desc">${i.recommendation}</span>
+        </div>
+      `).join('');
+
+      document.getElementById("summary-container").innerText = data.summary;
+    }
+  </script>
+</body>
+</html>
