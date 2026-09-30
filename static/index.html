@@ -12,11 +12,31 @@
       margin: 0;
       background: #ffffff;
     }
-    .header-title { font-size: 14px; color: #706e6b; margin-bottom: 12px; font-weight: 500; }
-    .metric-value { font-size: 46px; font-weight: 700; line-height: 1; color: #2e384d; margin-bottom: 4px; }
-    .metric-sub { font-size: 13px; color: #555555; margin-bottom: 20px; }
-    .section-title { font-size: 12px; font-weight: 600; color: #706e6b; margin-bottom: 10px; }
-    .section-block { margin-bottom: 18px; }
+    .header-title { font-size: 14px; color: #706e6b; margin-bottom: 8px; font-weight: 500; }
+    
+    /* Predict Action Button */
+    .btn-predict {
+      width: 100%;
+      background-color: #0176d3;
+      color: #ffffff;
+      border: none;
+      padding: 10px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-bottom: 16px;
+      transition: background-color 0.2s ease;
+    }
+    .btn-predict:hover { background-color: #014486; }
+    .btn-predict:disabled { background-color: #c9c7c5; cursor: not-allowed; }
+
+    /* Prediction Display Card */
+    #results-panel { display: none; }
+    .metric-value { font-size: 44px; font-weight: 700; line-height: 1; color: #2e384d; margin-bottom: 4px; }
+    .metric-sub { font-size: 13px; color: #555555; margin-bottom: 18px; }
+    .section-title { font-size: 12px; font-weight: 600; color: #706e6b; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .section-block { margin-bottom: 16px; }
     .list-item { display: flex; align-items: center; font-size: 12.5px; margin-bottom: 8px; }
     .badge-icon {
       width: 15px; height: 15px; border-radius: 50%;
@@ -28,6 +48,7 @@
     .score-green { color: #04844b; font-weight: 700; margin-right: 8px; min-width: 32px; }
     .score-red { color: #c23934; font-weight: 700; margin-right: 8px; min-width: 32px; }
     .desc { color: #4b4b4b; }
+    
     .summary-box {
       background: #f8fafc;
       border-left: 3px solid #0176d3;
@@ -37,8 +58,23 @@
       color: #333333;
       border-radius: 0 4px 4px 0;
     }
+
+    /* Data Used Summary Box */
+    .data-summary-box {
+      background: #f4f6f9;
+      border: 1px solid #e5e9f0;
+      border-radius: 4px;
+      padding: 10px 12px;
+      font-size: 11.5px;
+      line-height: 1.5;
+    }
+    .data-summary-box table { width: 100%; border-collapse: collapse; }
+    .data-summary-box td { padding: 3px 0; }
+    .data-summary-box td.label { color: #64748b; font-weight: 500; width: 45%; }
+    .data-summary-box td.val { color: #1e293b; font-weight: 600; }
+
     .status-msg {
-      margin-top: 14px;
+      margin-top: 12px;
       padding: 6px 8px;
       background: #f7f9fa;
       border-radius: 4px;
@@ -49,35 +85,48 @@
   </style>
 </head>
 <body>
-  <div class="header-title" id="card-header">Predicted Likelihood</div>
-  <div class="metric-value" id="score">--%</div>
-  <div class="metric-sub" id="card-sub">Likely Outcome</div>
+  <div class="header-title">ML Prediction Assistant</div>
+  
+  <button id="predict-btn" class="btn-predict" onclick="triggerPrediction()">
+    Run Prediction on Selected Mark
+  </button>
 
-  <div class="section-block">
-    <div class="section-title">Top Predictors</div>
-    <div id="predictors-container">
-      <div class="list-item"><span class="desc" style="color:#888;">Reading workbook records...</span></div>
+  <div id="results-panel">
+    <div class="metric-value" id="score">--%</div>
+    <div class="metric-sub" id="card-sub">Likely Outcome</div>
+
+    <!-- Data Model Used Section -->
+    <div class="section-block">
+      <div class="section-title">Data Used for Prediction</div>
+      <div id="model-data-container" class="data-summary-box">
+        <!-- Rendered dynamically -->
+      </div>
+    </div>
+
+    <!-- Top Drivers -->
+    <div class="section-block">
+      <div class="section-title">Top Predictors</div>
+      <div id="predictors-container"></div>
+    </div>
+
+    <!-- Actionable Improvements -->
+    <div class="section-block">
+      <div class="section-title">How To Improve This</div>
+      <div id="improvements-container"></div>
+    </div>
+
+    <!-- Model Summary -->
+    <div class="section-block">
+      <div class="section-title">Summary</div>
+      <div id="summary-container" class="summary-box"></div>
     </div>
   </div>
 
-  <div class="section-block">
-    <div class="section-title">How To Improve This</div>
-    <div id="improvements-container">
-      <div class="list-item"><span class="desc" style="color:#888;">Reading workbook records...</span></div>
-    </div>
-  </div>
-
-  <div class="section-block">
-    <div class="section-title">Summary</div>
-    <div id="summary-container" class="summary-box">
-      Evaluating model results...
-    </div>
-  </div>
-
-  <div id="status" class="status-msg">Extracting workbook data...</div>
+  <div id="status" class="status-msg">Initializing extension...</div>
 
   <script>
     let pooledRecords = [];
+    let currentSelectedRecord = null;
 
     function getCleanColumnName(colMeta) {
       let name = colMeta.caption || colMeta.fieldName || "Feature";
@@ -115,44 +164,58 @@
       const dashboard = tableau.extensions.dashboardContent.dashboard;
       const statusEl = document.getElementById("status");
 
-      for (const sheet of dashboard.worksheets) {
-        try {
-          const summary = await sheet.getSummaryDataAsync();
-          if (summary.data && summary.data.length > 0) {
-            summary.data.forEach(row => {
-              pooledRecords.push(normalizeRow(summary.columns, row));
-            });
-          }
-        } catch (e) {}
+      async function refreshDashboardData() {
+        pooledRecords = [];
+        for (const sheet of dashboard.worksheets) {
+          try {
+            const summary = await sheet.getSummaryDataAsync();
+            if (summary.data && summary.data.length > 0) {
+              summary.data.forEach(row => {
+                pooledRecords.push(normalizeRow(summary.columns, row));
+              });
+            }
+          } catch (e) {}
+        }
+        if (pooledRecords.length > 0 && !currentSelectedRecord) {
+          currentSelectedRecord = pooledRecords[0];
+        }
       }
 
-      if (pooledRecords.length > 0) {
-        statusEl.innerText = `Ingested ${pooledRecords.length} records. Computing prediction...`;
-        sendToModel(pooledRecords, pooledRecords[0]);
-      } else {
-        statusEl.innerText = "No data rows available on dashboard worksheets.";
-      }
+      await refreshDashboardData();
+      statusEl.innerText = `Ready. ${pooledRecords.length} records loaded. Select a mark and click 'Run Prediction'.`;
 
+      // Listen for user selections without auto-submitting
       dashboard.worksheets.forEach((sheet) => {
         sheet.addEventListener(tableau.TableauEventType.MarkSelectionChanged, async (event) => {
           const marks = await event.getMarksAsync();
           if (marks.data && marks.data.length > 0 && marks.data[0].data.length > 0) {
-            const selectedRecord = normalizeRow(marks.data[0].columns, marks.data[0].data[0]);
-            sendToModel(pooledRecords, selectedRecord);
+            currentSelectedRecord = normalizeRow(marks.data[0].columns, marks.data[0].data[0]);
+            statusEl.innerText = "New mark selected. Click 'Run Prediction' to evaluate.";
           }
         });
       });
     });
 
-    async function sendToModel(records, selectedRecord) {
+    async function triggerPrediction() {
+      const btn = document.getElementById("predict-btn");
       const statusEl = document.getElementById("status");
+
+      if (!pooledRecords || pooledRecords.length === 0) {
+        statusEl.innerText = "No dashboard data available to predict.";
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerText = "Computing Prediction...";
+      statusEl.innerText = "Training model and calculating feature contributions...";
+
       try {
         const response = await fetch("/predict", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            records: records,
-            selected_record: selectedRecord || records[0]
+            records: pooledRecords,
+            selected_record: currentSelectedRecord || pooledRecords[0]
           })
         });
 
@@ -160,19 +223,40 @@
         if (result.error) {
           statusEl.innerText = result.error;
         } else {
-          renderCard(result);
-          statusEl.innerText = `Evaluated across ${records.length} records in workbook.`;
+          renderCard(result, currentSelectedRecord || pooledRecords[0]);
+          document.getElementById("results-panel").style.display = "block";
+          statusEl.innerText = `Evaluated against ${pooledRecords.length} workbook rows.`;
         }
       } catch (err) {
         statusEl.innerText = "Request failed: " + err.message;
+      } finally {
+        btn.disabled = false;
+        btn.innerText = "Run Prediction on Selected Mark";
       }
     }
 
-    function renderCard(data) {
-      document.getElementById("card-header").innerText = `Predicted Outcome: ${data.target_name}`;
-      document.getElementById("card-sub").innerText = `Likelihood: ${data.target_name}`;
+    function renderCard(data, usedRecord) {
+      document.getElementById("card-sub").innerText = `Predicted: ${data.target_name}`;
       document.getElementById("score").innerText = data.likelihood + "%";
 
+      // 1. Render Data Used Summary Table
+      const dataContainer = document.getElementById("model-data-container");
+      const entries = Object.entries(usedRecord || {})
+        .filter(([k, v]) => v !== null && v !== undefined && k !== "Measure Names" && k !== "Measure Values")
+        .slice(0, 6); // Display up to 6 key attributes
+
+      if (entries.length > 0) {
+        dataContainer.innerHTML = `<table>` + entries.map(([key, val]) => `
+          <tr>
+            <td class="label">${key}</td>
+            <td class="val">${val}</td>
+          </tr>
+        `).join('') + `</table>`;
+      } else {
+        dataContainer.innerText = "Single record baseline used.";
+      }
+
+      // 2. Render Predictors
       const predCont = document.getElementById("predictors-container");
       predCont.innerHTML = data.predictors.map(p => `
         <div class="list-item">
@@ -182,6 +266,7 @@
         </div>
       `).join('');
 
+      // 3. Render Improvements
       const impCont = document.getElementById("improvements-container");
       impCont.innerHTML = data.improvements.map(i => `
         <div class="list-item">
@@ -191,6 +276,7 @@
         </div>
       `).join('');
 
+      // 4. Render Summary Box
       document.getElementById("summary-container").innerText = data.summary;
     }
   </script>
