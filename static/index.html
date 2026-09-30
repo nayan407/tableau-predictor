@@ -24,11 +24,20 @@
       font-weight: 600;
       border-radius: 4px;
       cursor: pointer;
-      margin-bottom: 16px;
+      margin-bottom: 12px;
       transition: background-color 0.2s ease;
     }
     .btn-predict:hover { background-color: #014486; }
     .btn-predict:disabled { background-color: #c9c7c5; cursor: not-allowed; }
+
+    #health-banner {
+      display: none;
+      padding: 8px 12px;
+      margin-bottom: 14px;
+      border-radius: 4px;
+      font-size: 11.5px;
+      line-height: 1.4;
+    }
 
     #results-panel { display: none; }
     .metric-value { font-size: 44px; font-weight: 700; line-height: 1; color: #2e384d; margin-bottom: 4px; }
@@ -87,6 +96,8 @@
   <button id="predict-btn" class="btn-predict" onclick="triggerPrediction()">
     Run Prediction on Selected Mark
   </button>
+
+  <div id="health-banner"></div>
 
   <div id="results-panel">
     <div class="metric-value" id="score">--%</div>
@@ -190,6 +201,7 @@
     async function triggerPrediction() {
       const btn = document.getElementById("predict-btn");
       const statusEl = document.getElementById("status");
+      const healthBanner = document.getElementById("health-banner");
 
       if (!pooledRecords || pooledRecords.length === 0) {
         statusEl.innerText = "No dashboard data available to predict.";
@@ -197,10 +209,35 @@
       }
 
       btn.disabled = true;
-      btn.innerText = "Computing Prediction...";
-      statusEl.innerText = "Training model and calculating feature contributions...";
+      btn.innerText = "Validating & Predicting...";
 
       try {
+        // 1. Audit Check Call
+        const valRes = await fetch("/validate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            records: pooledRecords,
+            selected_record: currentSelectedRecord || pooledRecords[0]
+          })
+        });
+        const audit = await valRes.json();
+
+        healthBanner.style.display = "block";
+        if (audit.score >= 80) {
+          healthBanner.style.background = "#e6f4ea";
+          healthBanner.style.color = "#137333";
+          healthBanner.style.border = "1px solid #ceead6";
+          healthBanner.innerHTML = `✔ <b>Model Health: ${audit.status} (${audit.score}/100)</b>`;
+        } else {
+          healthBanner.style.background = "#fef7e0";
+          healthBanner.style.color = "#b06000";
+          healthBanner.style.border = "1px solid #fce8b2";
+          const issuesList = (audit.warnings || []).concat(audit.issues || []).join("<br>• ");
+          healthBanner.innerHTML = `⚠ <b>Model Health: ${audit.status} (${audit.score}/100)</b><br>• ${issuesList}`;
+        }
+
+        // 2. Prediction Call
         const response = await fetch("/predict", {
           method: "POST",
           headers: { "Content-Type": "application/json" },

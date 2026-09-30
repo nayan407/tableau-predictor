@@ -12,7 +12,7 @@ from sklearn.preprocessing import OrdinalEncoder
 
 app = FastAPI()
 
-# Enable CORS for Tableau Desktop and Cloud environments
+# Enable CORS for Tableau Desktop, Server, and Cloud
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,13 +21,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. Root routes to serve index.html directly
+# Root route handlers
 @app.get("/")
 @app.get("/index.html")
 def serve_index():
     return FileResponse("static/index.html")
 
-# 2. Static directory mount
+# Static assets mount
 if os.path.exists("static"):
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -43,18 +43,99 @@ def clean_key(name: str) -> str:
     cleaned = str(name)
     if "." in cleaned:
         cleaned = cleaned.split(".")[-1]
-    cleaned = (
+    return (
         cleaned.replace("[", "")
         .replace("]", "")
         .replace("sum:", "")
         .replace("avg:", "")
         .replace("attr:", "")
+        .replace("min:", "")
+        .replace("max:", "")
         .replace(":qk", "")
         .replace(":nk", "")
         .replace(":ok", "")
         .strip()
     )
-    return cleaned
+
+def audit_features_and_leakage(df: pd.DataFrame, target_name: str, selected_clean: dict):
+    issues = []
+    warnings = []
+    
+    # 1. Target Leakage Check
+    target_clean = clean_key(target_name).lower()
+    for col in df.columns:
+        c_clean = clean_key(col).lower()
+        if c_clean == target_clean or (target_clean in c_clean and abs(len(c_clean) - len(target_clean)) < 5):
+            issues.append(f"Target leakage detected: '{col}' matches target '{target_name}'. Excluded from features.")
+    
+    # 2. Missing Fields in Selected Mark Check
+    missing_in_selected = []
+    for col in df.columns:
+        c = clean_key(col)
+        if c != clean_key(target_name) and (c not in selected_clean or selected_clean[c] in [None, "", "N/A"]):
+            missing_in_selected.append(c)
+            
+    if missing_in_selected:
+        warnings.append(f"Selected mark missing fields: {', '.join(missing_in_selected[:4])}. Populated with baseline fallback.")
+
+    # 3. Sample Size Check
+    if len(df) < 30:
+        warnings.append(f"Small sample size ({len(df)} rows). Recommended: 100+ rows for high statistical confidence.")
+        
+    return issues, warnings
+
+@app.post("/validate")
+def validate_dataset(payload: PredictRequest):
+    records = payload.records
+    selected = payload.selected_record
+    
+    if not records or len(records) < 5:
+        return {
+            "status": "FAILED",
+            "score": 0,
+            "issues": ["Dataset contains fewer than 5 rows. Cannot train."],
+            "warnings": [],
+            "summary": "Insufficient rows."
+        }
+        
+    raw_df = pd.DataFrame(records).dropna(how="all", axis=1)
+    clean_cols = {c: clean_key(c) for c in raw_df.columns}
+    df = raw_df.rename(columns=clean_cols)
+    selected_clean = {clean_key(k): v for k, v in selected.items() if v is not None}
+    
+    # Auto-detect target column
+    target_col = None
+    for kw in ["profit", "churn", "won", "converted", "status", "sales", "target"]:
+        for c in df.columns:
+            if kw in c.lower():
+                target_col = c
+                break
+        if target_col:
+            break
+    if not target_col:
+        target_col = df.columns[0]
+        
+    leakage_issues, mark_warnings = audit_features_and_leakage(df, target_col, selected_clean)
+    
+    health_score = 100
+    if leakage_issues:
+        health_score -= 20
+    if mark_warnings:
+        health_score -= 15 * len(mark_warnings)
+    if len(df.columns) < 3:
+        health_score -= 25
+    health_score = max(health_score, 10)
+    
+    status_label = "HEALTHY" if health_score >= 80 else ("FAIR" if health_score >= 50 else "ACTION REQUIRED")
+    
+    return {
+        "status": status_label,
+        "score": health_score,
+        "target_detected": target_col,
+        "issues": leakage_issues,
+        "warnings": mark_warnings,
+        "summary": f"Data Health: {health_score}/100. Evaluated {len(df)} rows."
+    }
 
 @app.post("/predict")
 def run_prediction(payload: PredictRequest):
@@ -65,40 +146,26 @@ def run_prediction(payload: PredictRequest):
         return {"error": "Need at least 5 rows from Tableau worksheets to train the prediction model."}
 
     raw_df = pd.DataFrame(records).dropna(how="all", axis=1)
-
-    # Clean all column names
     clean_cols = {c: clean_key(c) for c in raw_df.columns}
     df = raw_df.rename(columns=clean_cols)
-
     selected_clean = {clean_key(k): v for k, v in selected.items() if v is not None}
 
-    # Case 1: Only 1 column passed by Tableau
+    # Case 1: Insufficient features
     if len(df.columns) < 2:
         col_name = df.columns[0] if len(df.columns) > 0 else "Metric"
-        val = selected_clean.get(col_name, "N/A")
         return {
             "target_name": col_name,
             "likelihood": 50,
             "predictors": [
-                {
-                    "impact": 0,
-                    "label": "Place more fields (e.g., Region, Category, Sales, Discount) on the Marks Detail card"
-                }
+                {"impact": 0, "label": "Add dimensions and measures to the Worksheet Detail shelf to generate features."}
             ],
             "improvements": [
-                {
-                    "lift": "N/A",
-                    "recommendation": "Add dimensions and measures to your sheet to enable multi-variable ML predictions."
-                }
+                {"lift": "N/A", "recommendation": "Expose more fields (e.g., Region, Discount, Sales) on the sheet."}
             ],
-            "summary": (
-                f"Currently evaluated against single feature '{col_name}'. "
-                "Tableau extensions only receive fields present on the active sheet view. "
-                "Drag additional fields to Detail/Tooltip to calculate driver importance."
-            )
+            "summary": "Single-column input. Add fields to Marks shelf so the model can evaluate multidimensional patterns."
         }
 
-    # Case 2: Multi-column predictive evaluation
+    # Case 2: Target Selection
     target_keywords = ["profit", "churn", "won", "converted", "status", "sales", "discount", "target"]
     target_col = None
     for kw in target_keywords:
@@ -113,24 +180,39 @@ def run_prediction(payload: PredictRequest):
         target_col = df.columns[0]
 
     y_raw = df[target_col].copy()
-    X_raw = df.drop(columns=[target_col]).copy()
 
-    # Formulate binary classification target
+    # STRICT ANTI-LEAKAGE: Remove target and target-derivative columns from feature set
+    t_clean = clean_key(target_col).lower()
+    drop_cols = [
+        c for c in df.columns 
+        if clean_key(c).lower() == t_clean or (t_clean in clean_key(c).lower() and "margin" not in clean_key(c).lower())
+    ]
+    X_raw = df.drop(columns=drop_cols).copy()
+
+    if X_raw.empty or len(X_raw.columns) == 0:
+        return {
+            "target_name": target_col,
+            "likelihood": 50,
+            "predictors": [{"impact": 0, "label": "No independent predictor features left after target leakage exclusion."}],
+            "improvements": [{"lift": "N/A", "recommendation": "Add non-target features (Region, Category, Volume) to worksheet."}],
+            "summary": "Only target-related columns were supplied. Add predictor fields to Worksheet Detail."
+        }
+
+    # Binary Classification Target setup
     if pd.api.types.is_numeric_dtype(y_raw) or pd.to_numeric(y_raw, errors="coerce").notna().all():
         y_num = pd.to_numeric(y_raw, errors="coerce").fillna(0)
-        median_val = y_num.median()
+        median_val = float(y_num.median())
         y = (y_num >= median_val).astype(int)
-        target_label = f"High {target_col} (≥ {round(float(median_val), 1)})"
+        target_label = f"High {target_col} (≥ {round(median_val, 1)})"
     else:
-        top_val = y_raw.value_counts().index[0]
+        top_val = str(y_raw.value_counts().index[0])
         y = (y_raw == top_val).astype(int)
         target_label = f"{target_col}: {top_val}"
 
-    # Handle edge case where target is uniform
     if y.nunique() < 2:
         y.iloc[0] = 1 - y.iloc[0]
 
-    # Preprocess features
+    # Preprocessing
     X_processed = pd.DataFrame(index=X_raw.index)
     encoders = {}
     num_cols = []
@@ -160,16 +242,15 @@ def run_prediction(payload: PredictRequest):
         val = selected_clean.get(col, None)
         if col in num_cols:
             val_num = pd.to_numeric(val, errors="coerce")
-            selected_row[col] = 0 if pd.isna(val_num) else val_num
+            selected_row[col] = X_processed[col].median() if pd.isna(val_num) else val_num
         else:
             str_val = "Unknown" if val is None else str(val)
             selected_row[col] = encoders[col].transform([[str_val]])[0][0]
 
-    # Compute Likelihood %
     probs = model.predict_proba(selected_row)[0]
     likelihood = int(round(probs[1] * 100)) if len(probs) > 1 else int(round(probs[0] * 100))
 
-    # Feature importances
+    # Feature Importances
     importances = model.feature_importances_
     sorted_idx = np.argsort(importances)[::-1][:4]
     top_predictors = []
@@ -191,8 +272,8 @@ def run_prediction(payload: PredictRequest):
         })
 
     summary_text = (
-        f"This selected profile demonstrates a {likelihood}% likelihood of achieving {target_label}. "
-        f"Primary influential factor: {top_predictors[0]['label'] if top_predictors else 'baseline trend'}."
+        f"This profile demonstrates a {likelihood}% likelihood of achieving {target_label}. "
+        f"Primary driver: {top_predictors[0]['label'] if top_predictors else 'baseline trend'}."
     )
 
     return {
